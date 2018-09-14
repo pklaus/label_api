@@ -1,0 +1,96 @@
+#!/usr/bin/env python
+
+# std lib
+import logging, io
+
+# external deps
+import brother_ql
+import brother_ql.backends.helpers
+from bottle import route, run, template, request, response
+import click
+
+# internal modules
+import plugin_loader
+
+PLUGIN_FOLDER = "./label_plugins"
+
+LABEL_API_HOST = "0.0.0.0"
+LABEL_API_PORT = 8765
+
+BROTHER_QL_MODEL = "QL-800"
+BROTHER_QL_BACKEND = None
+BROTHER_QL_PRINTER = "file:///dev/usb/lp0"
+
+DEBUG = False
+
+@route('/api/preview/<label_plugin_name>')
+def preview_label(label_plugin_name):
+    params = dict(request.params.decode())
+    plugin = plugin_loader.get_plugin_by_name(label_plugin_name, PLUGIN_FOLDER)
+    label = plugin.create_label(**params)
+    if plugin.BROTHER_QL_LABEL == '62':
+        from PIL import Image, ImageDraw
+        full_size = label.size[0] + 36, label.size[1] + 36
+        im = Image.new("L", full_size, (255,))
+        draw = ImageDraw.Draw(im)
+        draw.rectangle(((17, 17), tuple(coord - 18 for coord in full_size)), outline=180)
+        im.paste(label, box=(18, 18))
+        label = im
+    byte_io = io.BytesIO()
+    label.save(byte_io, 'PNG')
+    byte_io.seek(0)
+    response.content_type = 'image/png'
+    return byte_io
+
+@route('/api/print/<label_plugin_name>')
+def print_label(label_plugin_name):
+    # url params:
+    #params = request.params.dict
+    params = dict(request.params.decode())
+    try:
+        plugin = plugin_loader.get_plugin_by_name(label_plugin_name, PLUGIN_FOLDER)
+    except plugin_loader.PluginNotFoundError:
+        return {'success': False, 'status': 'Label ' + label_plugin_name + ' not found'}
+    label = plugin.create_label(**params)
+    qlr = brother_ql.raster.BrotherQLRaster(BROTHER_QL_MODEL)
+    brother_ql.conversion.convert(qlr, [label], plugin.BROTHER_QL_LABEL, **plugin.BROTHER_QL_CONVERT_KWARGS)
+    kwargs = {
+      'printer_identifier': BROTHER_QL_PRINTER,
+      'backend_identifier': BROTHER_QL_BACKEND,
+      'blocking': True,
+    }
+    try:
+        result = brother_ql.backends.helpers.send(qlr.data, **kwargs)
+        success = result['did_print'] and result['ready_for_next_job']
+        return {'success': success, 'result': result}
+    except Exception as e:
+        return {'success': False, 'exception': str(e)}
+
+def run_server():
+    logging.basicConfig(level='DEBUG' if DEBUG else 'ERROR')
+    run(host=LABEL_API_HOST, port=LABEL_API_PORT)
+
+@click.command()
+@click.option('--host', default=LABEL_API_HOST, help='Host / IP to listen on')
+@click.option('--port', default=LABEL_API_PORT, help='Port to listen on')
+@click.option('--model', default=BROTHER_QL_MODEL , help='brother_ql model')
+@click.option('--backend', default=BROTHER_QL_BACKEND, help='brother_ql backend')
+@click.option('--printer', default=BROTHER_QL_PRINTER, help='brother_ql printer')
+@click.option('--debug', is_flag=True, help='Enable verbose debugging output')
+def cli(host, port, model, backend, printer, debug):
+    """
+    Start the label_api software
+    """
+    global LABEL_API_HOST, LABEL_API_PORT
+    global BROTHER_QL_MODEL, BROTHER_QL_BACKEND, BROTHER_QL_PRINTER
+    global DEBUG
+    LABEL_API_HOST = host
+    LABEL_API_PORT = port
+    BROTHER_QL_MODEL = model
+    BROTHER_QL_BACKEND = backend
+    BROTHER_QL_PRINTER = printer
+    DEBUG = debug
+    run_server()
+
+if __name__ == '__main__':
+    cli()

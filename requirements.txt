@@ -1,0 +1,4 @@
+brother_ql==0.9.3
+bottle
+click
+pillow
